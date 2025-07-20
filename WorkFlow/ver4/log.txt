@@ -1,0 +1,5 @@
+
+
+# 
+实现对ball paddle brick 的抽象
+- 没有对helpscene 和 启动界面进行图片绑定

@@ -1,0 +1,853 @@
+# 我做了一个打砖块小游戏,其中的存档机制非常不好用,请按照我的需求重新设计一个存档功能
+
+# 需求
+- 游戏按空格键暂停游戏,再按空格回复游戏或者按Esc退出游戏
+- 暂停游戏后按键盘q,w,e可以依次存档到slot1.sav,slot2.sav,slot3.sav;
+- 在关卡选择页面可以选择载入那个存档
+
+#
+- 快速理解需求，准确定位代码的相关部分。
+- 根据需求，给出需要替换的原代码和替换后的新代码，或新增代码的具体插入位置。
+- 以结构化方式输出：
+定位说明（如函数名、关键行等）
+修改建议（原代码与新代码的对比）
+新增代码（插入位置说明及代码）
+提供的代码都用markdown代码块包围
+不要生成全部项目代码
+
+# 源码
+
+#include <SFML/Graphics.hpp>
+#include <SFML/Audio.hpp>
+#include <optional>
+#include <cstdint>
+#include <vector>
+#include <string>
+#include <fstream>
+#include <sstream>
+#include <unordered_map>
+#include <random>
+#include<algorithm>
+#include<numeric>
+
+// ===================== 资源管理 ========================
+class ResourceManager {
+    std::unordered_map<std::string, sf::Texture>    textures;
+    std::unordered_map<std::string, sf::SoundBuffer> soundBuffers;
+    std::unordered_map<std::string, sf::Font>       fonts;
+
+    ResourceManager() {
+        textures["Brick"].loadFromFile("assets/images/BrickPicture.png");
+        textures["BrickImpacted"].loadFromFile("assets/images/BrickImpacted.png");
+        textures["BrickMark"].loadFromFile("assets/images/BrickMark.png");
+        textures["Paddle"].loadFromFile("assets/images/PaddlePicture.png");
+        textures["Ball"].loadFromFile("assets/images/SmallBallPicture.png");
+        textures["Bg1"].loadFromFile("assets/images/Level1GameBackground.png");
+        textures["Bg2"].loadFromFile("assets/images/Level2GameBackground.png");
+        textures["Bg3"].loadFromFile("assets/images/Level3GameBackground.png");
+        textures["Interface"].loadFromFile("assets/images/InterfacePicture.png");
+        soundBuffers["Impact"].loadFromFile("assets/sounds/ImpactSound.wav");
+        soundBuffers["Rebound"].loadFromFile("assets/sounds/ReboundSound.wav");
+        fonts["Arial"].openFromFile("assets/fonts/arial.ttf");
+        fonts["Consola"].openFromFile("assets/fonts/consola.ttf");
+    }
+public:
+    static ResourceManager& getInstance() { static ResourceManager r; return r; }
+    sf::Texture& getTexture(const std::string& key) { return textures.at(key); }
+    sf::SoundBuffer& getSoundBuffer(const std::string& k) { return soundBuffers.at(k); }
+    sf::Font& getFont(const std::string& key) { return fonts.at(key); }
+};
+
+// ===================== 音效管理 ========================
+class SoundManager {
+    sf::Sound impactSound;
+    sf::Sound reboundSound;
+    sf::Music music;
+    bool enableSound = true, enableMusic = true;
+public:
+    SoundManager()
+        : impactSound(ResourceManager::getInstance().getSoundBuffer("Impact"))
+        , reboundSound(ResourceManager::getInstance().getSoundBuffer("Rebound"))
+    {
+        if (music.openFromFile("assets/sounds/BackgroundMusic.wav"))
+            music.setLooping(true);
+    }
+    void playImpact() { if (enableSound) impactSound.play(); }
+    void playRebound() { if (enableSound) reboundSound.play(); }
+    void playMusic() { if (enableMusic && music.getStatus() != sf::Music::Status::Playing) music.play(); }
+    void stopMusic() { music.stop(); }
+    void setSound(bool e) { enableSound = e; }
+    void setMusic(bool e) { enableMusic = e; }
+    bool isSoundOn() const { return enableSound; }
+    bool isMusicOn() const { return enableMusic; }
+};
+
+// ===================== 存档管理 ========================
+struct SaveData {
+    int level = 1;
+    float paddleX = 0;
+    float ballX = 0, ballY = 0;
+    float ballVelX = 0, ballVelY = 0;
+    std::vector<uint8_t> bricksAlive;
+    std::vector<uint8_t> bricksNeedDoubleHit;
+    std::vector<uint8_t> bricksImpacted;
+    std::vector<uint8_t> bricksCooldown;//冷却
+
+    void save(const std::string& path) {
+        std::ofstream out(path, std::ios::binary);
+        out.write((char*)&level, sizeof(level));
+        out.write((char*)&paddleX, sizeof(paddleX));
+        out.write((char*)&ballX, sizeof(ballX));
+        out.write((char*)&ballY, sizeof(ballY));
+        out.write((char*)&ballVelX, sizeof(ballVelX));
+        out.write((char*)&ballVelY, sizeof(ballVelY));
+
+        uint32_t n = bricksAlive.size();
+        out.write((char*)&n, sizeof(n));
+        out.write((char*)bricksAlive.data(), n);
+        out.write((char*)bricksNeedDoubleHit.data(), n);
+        out.write((char*)bricksImpacted.data(), n);
+        out.write((char*)bricksCooldown.data(), n);
+    }
+
+    bool load(const std::string& path) {
+        std::ifstream in(path, std::ios::binary);
+        if (!in) return false;
+        in.read((char*)&level, sizeof(level));
+        in.read((char*)&paddleX, sizeof(paddleX));
+        in.read((char*)&ballX, sizeof(ballX));
+        in.read((char*)&ballY, sizeof(ballY));
+        in.read((char*)&ballVelX, sizeof(ballVelX));
+        in.read((char*)&ballVelY, sizeof(ballVelY));
+
+        uint32_t n = 0;
+        in.read((char*)&n, sizeof(n));
+        bricksAlive.resize(n);
+        bricksNeedDoubleHit.resize(n);
+        bricksImpacted.resize(n);
+        bricksCooldown.resize(n);
+        in.read((char*)bricksAlive.data(), n);
+        in.read((char*)bricksNeedDoubleHit.data(), n);
+        in.read((char*)bricksImpacted.data(), n);
+        in.read((char*)bricksCooldown.data(), n);
+        return true;
+    }
+};
+
+// ===================== 游戏组件类 =====================
+
+class Brick {
+public:
+    static constexpr float BRICK_WIDTH = 75, BRICK_HEIGHT = 25;
+    sf::Sprite sprite;
+    bool alive = true;
+    bool needsDoubleHit = false;
+    bool isImpacted = false;
+    int hitCooldown = 0; // 新增：碰撞冷却计数器
+
+    Brick(const sf::Vector2f& pos)
+        : sprite(ResourceManager::getInstance().getTexture("Brick"))
+    {
+        sprite.setPosition(pos);
+        auto texSize = sprite.getTexture().getSize();
+        sprite.setScale({ BRICK_WIDTH / texSize.x, BRICK_HEIGHT / texSize.y });
+    }
+    sf::FloatRect getBounds() const { return sprite.getGlobalBounds(); }
+
+    //更新冷却
+    void updateCooldown() {
+        if (hitCooldown > 0) {
+            hitCooldown--;
+        }
+    }
+
+    // 新代码setDoubleHit方法
+    void setDoubleHit(bool doubleHit) {
+        needsDoubleHit = doubleHit;
+        if (doubleHit) {
+            sprite.setTexture(ResourceManager::getInstance().getTexture("BrickMark"));
+            // 重新设置缩放，因为新纹理可能有不同尺寸
+            auto texSize = sprite.getTexture().getSize();
+            sprite.setScale({ BRICK_WIDTH / texSize.x, BRICK_HEIGHT / texSize.y });
+        }
+    }
+    bool hit() {
+        if (hitCooldown > 0) {
+            return false; // 在冷却期间，不处理碰撞
+        }
+
+        if (!needsDoubleHit) {
+            // 普通砖块，一击即毁
+            alive = false;
+            hitCooldown = 10; // 设置冷却时间
+            return true; // 砖块被摧毁
+        }
+        else {
+            // 需要双击的砖块
+            if (!isImpacted) {
+                // 第一次被击中，变成受损状态
+                isImpacted = true;
+                sprite.setTexture(ResourceManager::getInstance().getTexture("BrickImpacted"));
+                // 重新设置缩放
+                auto texSize = sprite.getTexture().getSize();
+                sprite.setScale({ BRICK_WIDTH / texSize.x, BRICK_HEIGHT / texSize.y });
+                hitCooldown = 15; // 为双击砖块设置更长的冷却时间
+                return false; // 砖块未被摧毁，只是受损
+            }
+            else {
+                // 第二次被击中，摧毁砖块
+                alive = false;
+                hitCooldown = 10; // 设置冷却时间
+                return true; // 砖块被摧毁
+            }
+        }
+    }
+
+
+
+
+    void kill() { alive = false; }
+    void draw(sf::RenderWindow& window) { if (alive) window.draw(sprite); }
+};
+
+class Paddle {
+    sf::Sprite sprite;
+    float speed;
+public:
+    Paddle(float width, const sf::Vector2f& pos, float spd)
+        : sprite(ResourceManager::getInstance().getTexture("Paddle")), speed(spd)
+    {
+        sprite.setPosition(pos);
+        auto texSize = sprite.getTexture().getSize();
+        //PADDLE_HEIGHT==20.f
+        sprite.setScale({ width / texSize.x,  20.f / texSize.y });
+
+    }
+    void move(float dx, float minX, float maxX) {
+        auto pos = sprite.getPosition();
+        pos.x += dx * speed;
+        pos.x = std::max(minX, std::min(maxX - getSize().x, pos.x));
+        sprite.setPosition(pos);
+    }
+    void setPosition(const sf::Vector2f& pos) { sprite.setPosition(pos); }
+    sf::Vector2f getPosition() const { return sprite.getPosition(); }
+    sf::Vector2f getSize() const {
+        return { sprite.getGlobalBounds().size.x, sprite.getGlobalBounds().size.y };
+    }
+    sf::FloatRect getBounds() const { return sprite.getGlobalBounds(); }
+    void draw(sf::RenderWindow& w) { w.draw(sprite); }
+};
+
+class Ball {
+    sf::CircleShape shape;
+    sf::Vector2f velocity;
+public:
+    Ball(const sf::Vector2f& pos, float r, const sf::Vector2f& vel)
+        : shape(r), velocity(vel)
+    {
+        shape.setOrigin({ r, r });
+        shape.setTexture(&ResourceManager::getInstance().getTexture("Ball"));
+        shape.setPosition(pos);
+    }
+    void move() { shape.move(velocity); }
+    void setPosition(const sf::Vector2f& p) { shape.setPosition(p); }
+    void setVelocity(const sf::Vector2f& v) { velocity = v; }
+    sf::Vector2f getPosition() const { return shape.getPosition(); }
+    sf::Vector2f getVelocity() const { return velocity; }
+    void invertX() { velocity.x = -velocity.x; }
+    void invertY() { velocity.y = -velocity.y; }
+    void setYPositive(float v = 1.0f) { velocity.y = std::abs(velocity.y) * v; }
+    void setYNegative(float v = 1.0f) { velocity.y = -std::abs(velocity.y) * v; }
+    sf::FloatRect getBounds() const { return shape.getGlobalBounds(); }
+    float getRadius() const { return shape.getRadius(); }
+    void draw(sf::RenderWindow& w) { w.draw(shape); }
+
+};
+
+class LevelMap {
+    std::vector<Brick> bricks;
+public:
+    LevelMap(int level, float brickW, float brickH, float gap, unsigned winW, unsigned winH) {
+        std::vector<sf::Vector2f> positions;
+        int rows = 5, cols = 10;
+        if (level == 3) {
+            std::mt19937 rng{ std::random_device{}() };
+            std::uniform_real_distribution<float> dx(0, winW - brickW);
+            std::uniform_real_distribution<float> dy(50, 300);
+            for (int i = 0; i < 50; ++i)
+                positions.emplace_back(dx(rng), dy(rng));
+        }
+        else {
+            for (int i = 0; i < rows; ++i)
+                for (int j = 0; j < cols; ++j)
+                    if (level != 1 || i == 0 || i == rows - 1 || j == 0 || j == cols - 1)
+                        positions.push_back({
+                            j * (brickW + gap) + (winW - (cols * (brickW + gap) - gap)) / 2.f,
+                            i * (brickH + gap) + 50.f
+                            });
+        }
+        for (auto& pos : positions)
+            bricks.emplace_back(pos);
+
+        // 第二关设置随机10个砖块为双击砖块
+        if (level == 2 && bricks.size() >= 10) {
+            std::mt19937 rng{ std::random_device{}() };
+            std::vector<int> indices(bricks.size());
+            std::iota(indices.begin(), indices.end(), 0);
+            std::shuffle(indices.begin(), indices.end(), rng);
+
+            for (int i = 0; i < 10; ++i) {
+                bricks[indices[i]].setDoubleHit(true);
+            }
+        }
+    }
+    //冷却
+    std::vector<uint8_t> getCooldownData() const {
+        std::vector<uint8_t> v;
+        for (auto& b : bricks) v.push_back(static_cast<uint8_t>(b.hitCooldown));
+        return v;
+    }
+
+    void restoreCooldown(const std::vector<uint8_t>& cooldown) {
+        for (std::size_t i = 0; i < bricks.size() && i < cooldown.size(); ++i)
+            bricks[i].hitCooldown = static_cast<int>(cooldown[i]);
+    }
+
+
+    // 在LevelMap类中添加以下方法
+    std::vector<uint8_t> getDoubleHitData() const {
+        std::vector<uint8_t> v;
+        for (auto& b : bricks) v.push_back(b.needsDoubleHit ? 1 : 0);
+        return v;
+    }
+
+    std::vector<uint8_t> getImpactedData() const {
+        std::vector<uint8_t> v;
+        for (auto& b : bricks) v.push_back(b.isImpacted ? 1 : 0);
+        return v;
+    }
+
+    void restoreDoubleHitAndImpacted(const std::vector<uint8_t>& doubleHit, const std::vector<uint8_t>& impacted) {
+        for (std::size_t i = 0; i < bricks.size() && i < doubleHit.size() && i < impacted.size(); ++i) {
+            if (!bricks[i].alive) continue; // 已摧毁砖块不恢复贴图
+            bricks[i].needsDoubleHit = doubleHit[i];
+            bricks[i].isImpacted = impacted[i];
+
+            if (bricks[i].isImpacted) {
+                bricks[i].sprite.setTexture(ResourceManager::getInstance().getTexture("BrickImpacted"));
+            }
+            else if (bricks[i].needsDoubleHit) {
+                bricks[i].sprite.setTexture(ResourceManager::getInstance().getTexture("BrickMark"));
+            }
+            else {
+                bricks[i].sprite.setTexture(ResourceManager::getInstance().getTexture("Brick"));
+            }
+
+            auto texSize = bricks[i].sprite.getTexture().getSize();
+            bricks[i].sprite.setScale({ Brick::BRICK_WIDTH / texSize.x, Brick::BRICK_HEIGHT / texSize.y });
+        }
+    }
+
+
+
+
+    void draw(sf::RenderWindow& w) {
+        for (auto& b : bricks) b.draw(w);
+    }
+    std::vector<Brick>& getBricks() { return bricks; }
+    const std::vector<Brick>& getBricks() const { return bricks; }
+    std::size_t size() const { return bricks.size(); }
+    Brick& operator[](std::size_t i) { return bricks[i]; }
+    bool allDestroyed() const {
+        for (const auto& b : bricks)
+            if (b.alive) return false;
+        return true;
+    }
+    std::vector<uint8_t> getAliveData() const {
+        std::vector<uint8_t> v;
+        for (auto& b : bricks) v.push_back(b.alive ? 1 : 0);
+        return v;
+    }
+    void restoreAlive(const std::vector<uint8_t>& alive) {
+        for (std::size_t i = 0; i < bricks.size() && i < alive.size(); ++i)
+            bricks[i].alive = alive[i];
+    }
+};
+
+// =============== 游戏场景和菜单场景重构 =================
+
+class SplashScene {
+    sf::Sprite bg;
+    sf::Text text;
+public:
+    SplashScene()
+        : bg(ResourceManager::getInstance().getTexture("Interface"))
+        , text(ResourceManager::getInstance().getFont("Arial"), "Welcome to Arkanoid", 80)
+    {
+        bg.setScale({
+            800.0f / bg.getTexture().getSize().x,
+            600.0f / bg.getTexture().getSize().y }
+        );
+        text.setFillColor(sf::Color::Red);
+        text.setOrigin({ text.getLocalBounds().size.x / 2, text.getLocalBounds().size.y / 2 });
+        text.setPosition({ 400.f, 300.f });
+    }
+    void run(sf::RenderWindow& window, SoundManager& sound) {
+        sound.playMusic();
+        int ticks = 60 * 2;
+        while (window.isOpen() && ticks-- > 0) {
+            while (window.pollEvent()) {}
+            window.clear();
+            window.draw(bg);
+            window.draw(text);
+            window.display();
+            sf::sleep(sf::milliseconds(15));
+        }
+    }
+};
+
+class MenuScene {
+    sf::Sprite bg;
+    sf::Text title;
+    sf::Text start, help, quit;
+    int selected;
+public:
+    MenuScene()
+        : bg(ResourceManager::getInstance().getTexture("Interface"))
+        , title(ResourceManager::getInstance().getFont("Arial"), "Arkanoid", 64)
+        , start(ResourceManager::getInstance().getFont("Arial"), "Start Game", 48)
+        , help(ResourceManager::getInstance().getFont("Arial"), "Help", 48)
+        , quit(ResourceManager::getInstance().getFont("Arial"), "Quit", 48)
+        , selected(0)
+    {
+        bg.setScale({
+            800.0f / bg.getTexture().getSize().x,
+            600.0f / bg.getTexture().getSize().y }
+        );
+        float cx = 800 / 2.0f;
+        title.setOrigin({ title.getLocalBounds().size.x / 2, title.getLocalBounds().size.y / 2 });
+        title.setPosition({ cx,100 });
+        start.setPosition({ cx - 100, 270 });
+        help.setPosition({ cx - 100, 350 });
+        quit.setPosition({ cx - 100, 430 });
+    }
+    int run(sf::RenderWindow& window, SoundManager& sound) {
+        selected = 0;
+        while (window.isOpen()) {
+            window.clear();
+            window.draw(bg);
+            window.draw(title);
+            start.setFillColor(selected == 0 ? sf::Color::Green : sf::Color::White);
+            help.setFillColor(selected == 1 ? sf::Color::Green : sf::Color::White);
+            quit.setFillColor(selected == 2 ? sf::Color::Green : sf::Color::White);
+            window.draw(start); window.draw(help); window.draw(quit);
+            window.display();
+
+            while (const auto event = window.pollEvent()) {
+                if (event->is<sf::Event::Closed>()) window.close();
+                if (event->is<sf::Event::KeyPressed>()) {
+                    auto key = event->getIf<sf::Event::KeyPressed>()->scancode;
+                    using K = sf::Keyboard::Scancode;
+                    if (key == K::Down) { if (++selected > 2) selected = 0; sound.playImpact(); }
+                    else if (key == K::Up) { if (--selected < 0) selected = 2; sound.playImpact(); }
+                    else if (key == K::Enter) { sound.playImpact(); return selected; }
+                    else if (key == K::Escape) { return 2; }
+                }
+            }
+        }
+        return -1;
+    }
+};
+
+class HelpScene {
+    sf::Sprite bg;
+    std::vector<sf::Text> lines;
+public:
+    HelpScene()
+        : bg(ResourceManager::getInstance().getTexture("Interface"))
+    {
+        bg.setScale(
+            { 800.0f / bg.getTexture().getSize().x,
+            600.0f / bg.getTexture().getSize().y }
+        );
+        auto& font = ResourceManager::getInstance().getFont("Arial");
+        std::vector<std::string> h = {
+            "Arkanoid",
+            "Arrows : Move paddle",
+            "Esc    : Back to menu",
+            "S : Save, L : Load",
+            "M : Toggle Music, N : Toggle Sound",
+            "",
+            "Press ESC to return"
+        };
+        for (std::size_t i = 0; i < h.size(); ++i) {
+            sf::Text t(font, h[i], 36);
+            t.setFillColor(sf::Color::Red);
+            t.setPosition({ 120, float(70 + 50 * i) });
+            lines.push_back(t);
+        }
+    }
+    void run(sf::RenderWindow& window) {
+        while (window.isOpen()) {
+            window.clear();
+            window.draw(bg);
+            for (auto& t : lines) window.draw(t);
+            window.display();
+            while (const auto event = window.pollEvent()) {
+                if (event->is<sf::Event::Closed>()) window.close();
+                if (event->is<sf::Event::KeyPressed>()) {
+                    auto key = event->getIf<sf::Event::KeyPressed>()->scancode;
+                    if (key == sf::Keyboard::Scancode::Escape) return;
+                }
+            }
+        }
+    }
+};
+
+int showStartMenu(sf::RenderWindow& window, SoundManager& sound) {
+    const std::vector<std::string> opts = {
+        "New Game: Level 1", "New Game: Level 2", "New Game: Level 3",
+        "Load Slot1", "Load Slot2", "Load Slot3"
+    };
+    std::vector<sf::Text> texts;
+    for (int i = 0; i < (int)opts.size(); ++i)
+        texts.emplace_back(ResourceManager::getInstance().getFont("Arial"), opts[i], 36);
+    int sel = 0;
+    while (window.isOpen()) {
+        window.clear();
+        for (int i = 0; i < (int)texts.size(); ++i) {
+            texts[i].setFillColor(i == sel ? sf::Color::Green : sf::Color::White);
+            texts[i].setPosition({ 100.f, 100.f + 50.f * i });
+            window.draw(texts[i]);
+        }
+        window.display();
+
+        while (const auto e = window.pollEvent()) {
+            if (e->is<sf::Event::Closed>()) window.close();
+            if (e->is<sf::Event::KeyPressed>()) {
+                auto key = e->getIf<sf::Event::KeyPressed>()->scancode;
+                using K = sf::Keyboard::Scancode;
+                if (key == K::Down) { sel = (sel + 1) % texts.size(); sound.playImpact(); }
+                else if (key == K::Up) { sel = (sel - 1 + texts.size()) % texts.size(); sound.playImpact(); }
+                else if (key == K::Enter) { sound.playImpact(); return sel < 3 ? (sel + 1) : (sel + 11); }
+                else if (key == K::Escape) return 0;
+            }
+        }
+    }
+    return 0;
+}
+
+// ==================== Game Scene 类 ======================
+class GameScene {
+    // 在 GameScene 类的 private 部分开头插入
+    enum class GameState {
+        Playing,
+        GameOver,
+        WaitingSave,
+        WaitingLoad
+    };
+
+    GameState gameState = GameState::Playing;
+
+    static constexpr unsigned int WIDTH = 800, HEIGHT = 600;
+    static constexpr float  PADDLE_HEIGHT = 20, PADDLE_SPEED = 8;
+    static constexpr float BALL_RADIUS = 10, BALL_SPEED = 6;
+    static constexpr float BRICK_WIDTH = 75, BRICK_HEIGHT = 25, BRICK_GAP = 5;
+    float paddleWidth;
+    sf::Sprite background;
+    int level;
+    Paddle paddle;
+    Ball ball;
+    LevelMap levelMap;
+    bool isPlaying;
+    sf::Text infoText;
+    SoundManager& sound;
+public:
+    GameScene(SoundManager& sm, int lvl, std::optional<std::string> slotPath)
+        : background(ResourceManager::getInstance().getTexture("Bg" + std::to_string(lvl)))
+        , paddle(getPaddleWidthForLevel(lvl), sf::Vector2f((WIDTH - getPaddleWidthForLevel(lvl)) / 2, HEIGHT - PADDLE_HEIGHT - 20), PADDLE_SPEED)
+        , ball(sf::Vector2f(WIDTH / 2.f, HEIGHT / 2.f), BALL_RADIUS, sf::Vector2f(BALL_SPEED, -BALL_SPEED))
+        , levelMap(lvl, BRICK_WIDTH, BRICK_HEIGHT, BRICK_GAP, WIDTH, HEIGHT)
+        , infoText(ResourceManager::getInstance().getFont("Arial"), "", 50)
+        , sound(sm), level(lvl)
+    {
+        background.setPosition({ 0,0 });
+        float scaleX = float(WIDTH) / background.getTexture().getSize().x;
+        float scaleY = float(HEIGHT) / background.getTexture().getSize().y;
+        background.setScale({ scaleX, scaleY });
+        // 新代码构造函数存档加载部分
+        if (slotPath) {
+            SaveData d;
+            if (d.load(*slotPath)) {
+                level = d.level; // 确保关卡正确
+                paddle.setPosition({ d.paddleX, float(HEIGHT - PADDLE_HEIGHT - 20) });
+                ball.setPosition({ d.ballX, d.ballY });
+                ball.setVelocity({ d.ballVelX, d.ballVelY });
+                levelMap.restoreAlive(d.bricksAlive);
+                levelMap.restoreDoubleHitAndImpacted(d.bricksNeedDoubleHit, d.bricksImpacted);
+                levelMap.restoreCooldown(d.bricksCooldown);
+            }
+        }
+        isPlaying = true;
+        infoText.setString("");
+    }
+    static float getPaddleWidthForLevel(int l) {
+        switch (l) {
+        case 1: return 150.0f;
+        case 2: return 100.0f;
+        case 3: return 60.0f;
+        }
+        return 100.f;
+    }
+    int run(sf::RenderWindow& window) {
+        sound.playMusic();
+        while (window.isOpen()) {
+            if (!updateAndInput(window)) break;
+        }
+        if (!window.isOpen()) return 0;
+        infoText.setString("Press 1-3 to restart, ESC to menu");
+        render(window);
+        while (window.isOpen()) {
+            while (const auto& e = window.pollEvent()) {
+                if (e->is<sf::Event::Closed>()) window.close();
+                if (e->is<sf::Event::KeyPressed>()) {
+                    auto key = e->getIf<sf::Event::KeyPressed>()->scancode;
+                    if (key == sf::Keyboard::Scancode::Escape) return 0;
+                    if (key == sf::Keyboard::Scancode::Num1) return 1;
+                    if (key == sf::Keyboard::Scancode::Num2) return 2;
+                    if (key == sf::Keyboard::Scancode::Num3) return 3;
+                }
+            }
+            sf::sleep(sf::milliseconds(10));
+        }
+        return 0;
+    }
+    bool handleEvent(const sf::Event& event, sf::RenderWindow& window) {
+        if (event.is<sf::Event::Closed>()) window.close();
+        if (event.is<sf::Event::KeyPressed>()) {
+            auto key = event.getIf<sf::Event::KeyPressed>()->scancode;
+            using K = sf::Keyboard::Scancode;
+            if (key == K::Escape) return false;
+            // 处理状态切换和特殊按键
+            if (key == K::Escape) {
+                if (gameState == GameState::WaitingSave || gameState == GameState::WaitingLoad) {
+                    gameState = GameState::Playing;
+                    infoText.setString("");
+                    return true;
+                }
+                return false;
+            }
+
+            // 处理存档状态
+            if (gameState == GameState::WaitingSave) {
+                if (key >= K::Num1 && key <= K::Num3) {
+                    int slot = int(key) - int(K::Num1) + 1;
+                    save("assets/save/slot" + std::to_string(slot) + ".sav");
+                    infoText.setString("Saved to slot " + std::to_string(slot));
+                    sound.playImpact();
+                    gameState = GameState::Playing;
+                    return true;
+                }
+                return true; // 在等待存档状态时，忽略其他按键
+            }
+
+            // 处理读档状态
+            if (gameState == GameState::WaitingLoad) {
+                if (key >= K::Num1 && key <= K::Num3) {
+                    int slot = int(key) - int(K::Num1) + 1;
+                    load("assets/save/slot" + std::to_string(slot) + ".sav");
+                    gameState = GameState::Playing;
+                    return true;
+                }
+                return true; // 在等待读档状态时，忽略其他按键
+            }
+
+            // 正常游戏状态的按键处理
+            if (gameState == GameState::Playing) {
+                if (key == K::S) {
+                    gameState = GameState::WaitingSave;
+                    infoText.setString("Press 1-3 to save to slot, ESC to cancel");
+                    return true;
+                }
+                if (key == K::L) {
+                    gameState = GameState::WaitingLoad;
+                    infoText.setString("Press 1-3 to load from slot, ESC to cancel");
+                    return true;
+                }
+                if (key == K::M) {
+                    sound.setMusic(!sound.isMusicOn());
+                    if (sound.isMusicOn()) sound.playMusic();
+                    else sound.stopMusic();
+                }
+                if (key == K::N) {
+                    sound.setSound(!sound.isSoundOn());
+                }
+            }
+
+            if (key == K::L) load("assets/save/slot1.sav");
+            if (key == K::M) { sound.setMusic(!sound.isMusicOn()); if (sound.isMusicOn()) sound.playMusic(); else sound.stopMusic(); }
+            if (key == K::N) { sound.setSound(!sound.isSoundOn()); }
+        }
+        return true;
+    }
+    bool updateAndInput(sf::RenderWindow& window) {
+        while (const auto event = window.pollEvent()) {
+            if (!handleEvent(*event, window)) return false;
+        }
+        if (isPlaying) {
+            if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Left))
+                paddle.move(-1.0f, 0, WIDTH);
+            if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Right))
+                paddle.move(1.0f, 0, WIDTH);
+            ball.move();
+            auto pos = ball.getPosition();
+            auto vel = ball.getVelocity();
+            //
+            if (pos.x - ball.getRadius() < 0 || pos.x + ball.getRadius() > WIDTH) {
+                ball.invertX();
+                sound.playRebound();
+            }
+            if (pos.y - ball.getRadius() <= 0) {
+                ball.setPosition({ pos.x, BALL_RADIUS });
+                ball.setYPositive();
+                sound.playRebound();
+            }
+            if (pos.y - ball.getRadius() > HEIGHT) {
+                infoText.setString("Game Over!");
+                isPlaying = false;
+                gameState = GameState::GameOver;  // 新增这行
+                sound.playImpact();
+            }
+            if (ball.getBounds().findIntersection(paddle.getBounds())) {
+                ball.setYNegative();
+                ball.setPosition({ pos.x, paddle.getPosition().y - ball.getRadius() - 1 });
+                sound.playRebound();
+            }
+            // 更新所有砖块的碰撞冷却
+            for (auto& b : levelMap.getBricks()) {
+                if (b.alive) {
+                    b.updateCooldown();
+                }
+            }
+
+            for (auto& b : levelMap.getBricks()) {
+                if (!b.alive) continue;
+                if (ball.getBounds().findIntersection(b.getBounds())) {
+                    bool destroyed = b.hit();
+                    if (b.hitCooldown > 0) { // 如果碰撞被处理了（冷却开始）
+                        ball.invertY(); // 小球反弹
+                        if (destroyed) {
+                            sound.playImpact(); // 砖块被摧毁的音效
+                        }
+                        else {
+                            sound.playRebound(); // 砖块受损但未被摧毁的音效
+                        }
+                        break;
+                    }
+                }
+            }
+
+
+
+            if (levelMap.allDestroyed()) {
+                infoText.setString("You Win!");
+                isPlaying = false;
+                gameState = GameState::GameOver;//新增这行
+                sound.playImpact();
+            }
+        }
+        render(window);
+        return true;
+    }
+    void render(sf::RenderWindow& window) {
+        window.clear();
+        window.draw(background);
+        levelMap.draw(window);
+        paddle.draw(window);
+        ball.draw(window);
+        // 显示信息文本（游戏结束或等待输入时）
+        if (!isPlaying || gameState != GameState::Playing) {
+            if (!infoText.getString().isEmpty()) {
+                sf::FloatRect textRect = infoText.getLocalBounds();
+                infoText.setOrigin({ textRect.position.x + textRect.size.x / 2,
+                                     textRect.position.y + textRect.size.y / 2 });
+                infoText.setPosition({ WIDTH / 2.0f, HEIGHT / 2.0f });
+                window.draw(infoText);
+            }
+        }
+
+        window.display();
+    }
+    // 新代码save方法
+    void save(const std::string& path) {
+        SaveData d;
+        d.level = level;
+        d.paddleX = paddle.getPosition().x;
+        d.ballX = ball.getPosition().x;
+        d.ballY = ball.getPosition().y;
+        d.ballVelX = ball.getVelocity().x;
+        d.ballVelY = ball.getVelocity().y;
+        d.bricksAlive = levelMap.getAliveData();
+        d.bricksNeedDoubleHit = levelMap.getDoubleHitData();
+        d.bricksImpacted = levelMap.getImpactedData();
+        d.bricksCooldown = levelMap.getCooldownData();
+        d.save(path);
+    }
+    void load(const std::string& path) {
+        SaveData d;
+        if (!d.load(path)) return;
+        paddle.setPosition({ d.paddleX, HEIGHT - PADDLE_HEIGHT - 20 });
+        ball.setPosition({ d.ballX, d.ballY });
+        ball.setVelocity({ d.ballVelX, d.ballVelY });
+        levelMap.restoreAlive(d.bricksAlive);
+        levelMap.restoreDoubleHitAndImpacted(d.bricksNeedDoubleHit, d.bricksImpacted);
+        levelMap.restoreCooldown(d.bricksCooldown);
+        isPlaying = true;
+        infoText.setString("");
+    }
+};
+
+// ===================== Main ============================
+int main() {
+    sf::RenderWindow window(sf::VideoMode({ 800,600 }), "Arkanoid");
+    window.setFramerateLimit(60);
+
+    try { ResourceManager::getInstance(); }
+    catch (...) { return -1; }
+
+    SoundManager sound;
+    SplashScene splash;
+    MenuScene menu;
+    HelpScene help;
+
+    while (window.isOpen()) {
+        splash.run(window, sound);
+        while (window.isOpen()) {
+            int sel = menu.run(window, sound);
+            if (sel == 0) { // Start Game
+                int choice = showStartMenu(window, sound);
+                if (choice == 0) continue;
+                int level = (choice <= 3 ? choice : 1);
+                std::optional<std::string> slotPath;
+                if (choice >= 11) {
+                    int slot = choice - 10;
+                    slotPath = "assets/save/slot" + std::to_string(slot) + ".sav";
+                }
+                int next = level;
+                while (window.isOpen() && next > 0) {
+                    GameScene game(sound, next, slotPath);
+                    next = game.run(window);
+                    slotPath.reset();
+                }
+            }
+            else if (sel == 1) {
+                help.run(window);
+            }
+            else if (sel == 2) {
+                window.close();
+                break;
+            }
+        }
+    }
+    return 0;
+}
